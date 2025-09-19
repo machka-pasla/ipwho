@@ -1,0 +1,7 @@
+flask
+requests
+geoip2
+apscheduler
+werkzeug
+aiogram
+pycountry

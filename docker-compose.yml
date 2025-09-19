@@ -1,0 +1,26 @@
+services:
+  ipwho-web:
+    build: .
+    container_name: ipwho-web
+    hostname: ipwho-web
+    networks:
+      - remnawave-network
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: python app.py
+
+  ipwho-bot:
+    build: .
+    container_name: ipwho-bot
+    hostname: ipwho-bot
+    restart: unless-stopped
+    networks:
+      - remnawave-network
+    env_file:
+      - .env
+    command: python main.py
+
+networks:
+  remnawave-network:
+    external: true
