@@ -1,26 +1,26 @@
 services:
   ipwho-web:
-    build: .
+    image: ghcr.io/machka-pasla/ipwho:web
     container_name: ipwho-web
     hostname: ipwho-web
     networks:
-      - remnawave-network
+      - ipwho-network
     restart: unless-stopped
     env_file:
       - .env
-    command: python app.py
+    command: python -m app.web
 
   ipwho-bot:
-    build: .
+    image: ghcr.io/machka-pasla/ipwho:bot
     container_name: ipwho-bot
     hostname: ipwho-bot
     restart: unless-stopped
     networks:
-      - remnawave-network
+      - ipwho-network
     env_file:
       - .env
-    command: python main.py
+    command: python -m app.bot
 
 networks:
-  remnawave-network:
+  ipwho-network:
     external: true
