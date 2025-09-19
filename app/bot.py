@@ -362,7 +362,7 @@ def create_keyboard(host: str, ip: str) -> InlineKeyboardMarkup | None:
         return None
     rows: list[list[InlineKeyboardButton]] = []
     rows.extend([
-        [InlineKeyboardButton(text="BGP", url=f"https://bgp.tools/search?q={ip}")],
+        [InlineKeyboardButton(text="BGP", url=f"https://bgp.tools/prefix-selector?ip={ip}")],
         [InlineKeyboardButton(text="Censys", url=f"https://search.censys.io/hosts/{ip}")],
         [InlineKeyboardButton(text="IPinfo", url=f"https://ipinfo.io/{ip}")],
     ])
