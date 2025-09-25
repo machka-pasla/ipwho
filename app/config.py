@@ -2,6 +2,7 @@ import os
 
 LICENSE_KEY = os.getenv("LICENSE_KEY")
 IPINFO_TOKEN = os.getenv("IPINFO_TOKEN", "")
+DATA_DIR = os.getenv("DATA_DIR", "/data")
 
 WEBHOOK_DOMAIN = os.getenv('WEBHOOK_DOMAIN')
 API_TOKEN = os.getenv('API_TOKEN')

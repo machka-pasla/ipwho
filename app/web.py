@@ -2,7 +2,6 @@ import os
 import json
 import logging
 import ipaddress
-import requests
 from flask import Flask, request, Response
 from apscheduler.schedulers.background import BackgroundScheduler
 from werkzeug.serving import WSGIRequestHandler
@@ -16,6 +15,7 @@ from .geoip import (
     get_asn_info,
     get_ipinfo_info,
 )
+from .country_names import get_country_name
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,6 +37,20 @@ def classify_local_ip(addr: str) -> str | None:
     if obj.is_private:
         return "Private Network IP: Private"
     return None
+
+
+def resolve_ipinfo_country(ipinfo: dict | None, geo: dict) -> tuple[str, str]:
+    if not isinstance(ipinfo, dict):
+        return "", ""
+    country_code = (ipinfo.get("country", "") or "").upper()
+    if not country_code:
+        return "", ""
+    geo_code = (geo.get("country_code", "") or "").upper()
+    if country_code == geo_code:
+        country_name = geo.get("country_name", "") or get_country_name(country_code)
+    else:
+        country_name = ipinfo.get("country_name", "") or get_country_name(country_code)
+    return country_code, country_name
 
 
 def get_client_ip():
@@ -96,8 +110,7 @@ def generate_text(ip, geo, asn, ipinfo, user_agent):
 
         lines.append("IPinfo")
         if "error" not in ipinfo:
-            cc = ipinfo.get("country", "")
-            cname = geo.get("country_name", "") if cc and cc == geo.get("country_code", "") else ipinfo.get("country_name", "")
+            cc, cname = resolve_ipinfo_country(ipinfo, geo)
             ipinfo_geo = join_non_empty([
                 cc,
                 cname,
@@ -176,8 +189,7 @@ def ip_json():
             "user_agent": user_agent
         }
     else:
-        cc = ipinfo.get("country", "") if isinstance(ipinfo, dict) else ""
-        cname = geo.get("country_name", "") if cc and cc == geo.get("country_code", "") else (ipinfo.get("country_name", "") if isinstance(ipinfo, dict) else "")
+        cc, cname = resolve_ipinfo_country(ipinfo if isinstance(ipinfo, dict) else None, geo)
         data = {
             "ip": ip,
             "maxmind": {
@@ -226,8 +238,7 @@ def ip_json_info(ip_addr):
             "user_agent": user_agent
         }
     else:
-        cc = ipinfo.get("country", "") if isinstance(ipinfo, dict) else ""
-        cname = geo.get("country_name", "") if cc and cc == geo.get("country_code", "") else (ipinfo.get("country_name", "") if isinstance(ipinfo, dict) else "")
+        cc, cname = resolve_ipinfo_country(ipinfo if isinstance(ipinfo, dict) else None, geo)
         data = {
             "ip": ip_addr,
             "maxmind": {
