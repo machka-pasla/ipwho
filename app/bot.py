@@ -478,7 +478,7 @@ async def fetch_and_process_subscription(url: str) -> list[dict] | None:
 
 async def on_startup(app: web.Application):
     if not WEBHOOK_DOMAIN:
-        logging.error("WEBHOOK_DOMAIN is not set.")
+        logging.warning("WEBHOOK_DOMAIN is not set; skipping webhook registration.")
         return
     base = WEBHOOK_DOMAIN.strip()
     if not base.startswith(('http://', 'https://')):
@@ -505,7 +505,12 @@ async def healthcheck(request: web.Request) -> web.Response:
     return web.Response(text="ok")
 
 
-async def run_bot():
+async def run_webhook():
+    if not WEBHOOK_DOMAIN:
+        logging.info("WEBHOOK_DOMAIN is not configured; falling back to polling mode")
+        await run_polling()
+        return
+
     logging.info("Bot starting in webhook mode")
     app = web.Application()
     # health
@@ -525,10 +530,22 @@ async def run_bot():
     await web._run_app(app, host='0.0.0.0', port=WEBHOOK_PORT)
 
 
+async def run_polling():
+    logging.info("Bot starting in polling mode")
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception:
+        pass
+    await dp.start_polling(bot)
+
+
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s - %(levelname)s - %(message)s')
     if not API_TOKEN:
         logging.critical("API_TOKEN is not set. Exiting.")
     else:
-        asyncio.run(run_bot())
+        if WEBHOOK_DOMAIN:
+            asyncio.run(run_webhook())
+        else:
+            asyncio.run(run_polling())

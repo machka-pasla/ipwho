@@ -1,0 +1,36 @@
+.git
+.github
+.gitignore
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python environments
+.venv/
+venv/
+ENV/
+.env
+.env.local
+.env.*
+*.env
+
+# Packaging and build outputs
+build/
+dist/
+*.egg-info/
+
+# Logs and caches
+*.log
+.cache/
+pytest_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Local configuration
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
