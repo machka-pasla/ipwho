@@ -288,10 +288,7 @@ async def build_info_text(host: str, ip: str, extras: dict | None) -> str:
             if isinstance(val, str) and not val.strip():
                 continue
             safe_val = html_escape(str(val))
-            if key == "sni":
-                config_lines.append(f"{key}=<code>{safe_val}</code>")
-            else:
-                config_lines.append(f"{key}={safe_val}")
+            config_lines.append(f"<code>{key}={safe_val}</code>")
     if config_lines:
         add_blank_line()
         lines.extend(config_lines)
