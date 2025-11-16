@@ -1,6 +1,7 @@
 import tarfile
 import shutil
 import logging
+import time
 import requests
 import geoip2.database
 import maxminddb
@@ -31,6 +32,8 @@ GEOIP_CITY_ARCHIVE = MAXMIND_TMP_PATH / "GeoLite2-City.tar.gz"
 GEOIP_ASN_ARCHIVE = MAXMIND_TMP_PATH / "GeoLite2-ASN.tar.gz"
 
 IPINFO_LITE_BASE = "https://ipinfo.io/data/ipinfo_lite.mmdb"
+MAXMIND_REFRESH_INTERVAL = 86400  # seconds
+IPINFO_REFRESH_INTERVAL = 86400  # seconds
 
 city_reader = None
 asn_reader = None
@@ -103,67 +106,80 @@ def extract_tar_gz(archive_path: Path, extract_path: Path) -> None:
         logging.error("Extract error %s: %s", archive_path, e)
 
 
+def _is_recent(path: Path, max_age: int) -> bool:
+    if not path.exists():
+        return False
+    try:
+        return (time.time() - path.stat().st_mtime) < max_age
+    except OSError:
+        return False
+
+
 def update_databases() -> None:
     if not LICENSE_KEY:
         logging.error("LICENSE_KEY is not configured; cannot update MaxMind databases.")
     else:
-        url_city = (
-            "https://download.maxmind.com/app/geoip_download?"
-            f"edition_id=GeoLite2-City&license_key={LICENSE_KEY}&suffix=tar.gz"
-        )
-        url_asn = (
+        if all(_is_recent(db_path, MAXMIND_REFRESH_INTERVAL)
+               for db_path in (GEOIP_CITY_DB, GEOIP_ASN_DB)):
+            logging.info("MaxMind databases are fresh (<24h); skipping update.")
+        else:
+            url_city = (
+                "https://download.maxmind.com/app/geoip_download?"
+                f"edition_id=GeoLite2-City&license_key={LICENSE_KEY}&suffix=tar.gz"
+            )
+            url_asn = (
             "https://download.maxmind.com/app/geoip_download?"
             f"edition_id=GeoLite2-ASN&license_key={LICENSE_KEY}&suffix=tar.gz"
         )
 
-        logging.info("Updating MaxMind databases…")
-        download_db(url_city, GEOIP_CITY_ARCHIVE)
-        download_db(url_asn, GEOIP_ASN_ARCHIVE)
+            logging.info("Updating MaxMind databases…")
+            download_db(url_city, GEOIP_CITY_ARCHIVE)
+            download_db(url_asn, GEOIP_ASN_ARCHIVE)
 
-        if not GEOIP_CITY_ARCHIVE.exists() or not GEOIP_ASN_ARCHIVE.exists():
-            logging.error("MaxMind archive download failed; aborting update.")
-        else:
-            extract_path_city = MAXMIND_TMP_PATH / "GeoLite2-City"
-            extract_path_asn = MAXMIND_TMP_PATH / "GeoLite2-ASN"
+            if not GEOIP_CITY_ARCHIVE.exists() or not GEOIP_ASN_ARCHIVE.exists():
+                logging.error("MaxMind archive download failed; aborting update.")
+            else:
+                extract_path_city = MAXMIND_TMP_PATH / "GeoLite2-City"
+                extract_path_asn = MAXMIND_TMP_PATH / "GeoLite2-ASN"
 
-            shutil.rmtree(extract_path_city, ignore_errors=True)
-            shutil.rmtree(extract_path_asn, ignore_errors=True)
-
-            extract_tar_gz(GEOIP_CITY_ARCHIVE, extract_path_city)
-            extract_tar_gz(GEOIP_ASN_ARCHIVE, extract_path_asn)
-
-            close_databases()
-
-            city_updated = False
-            for mmdb_path in extract_path_city.rglob("*.mmdb"):
-                mmdb_path.replace(GEOIP_CITY_DB)
-                logging.info("City DB updated: %s", GEOIP_CITY_DB)
-                city_updated = True
-                break
-            if not city_updated:
-                logging.error("No City MMDB found in archive.")
-
-            asn_updated = False
-            for mmdb_path in extract_path_asn.rglob("*.mmdb"):
-                mmdb_path.replace(GEOIP_ASN_DB)
-                logging.info("ASN DB updated: %s", GEOIP_ASN_DB)
-                asn_updated = True
-                break
-            if not asn_updated:
-                logging.error("No ASN MMDB found in archive.")
-
-            load_databases()
-            logging.info("MaxMind update complete.")
-
-            # Cleanup artifacts
-            try:
-                GEOIP_CITY_ARCHIVE.unlink(missing_ok=True)
-                GEOIP_ASN_ARCHIVE.unlink(missing_ok=True)
                 shutil.rmtree(extract_path_city, ignore_errors=True)
                 shutil.rmtree(extract_path_asn, ignore_errors=True)
-                logging.info("Old downloaded DBs cleaned up.")
-            except Exception as e:
-                logging.warning("Cleanup error: %s", e)
+
+                extract_tar_gz(GEOIP_CITY_ARCHIVE, extract_path_city)
+                extract_tar_gz(GEOIP_ASN_ARCHIVE, extract_path_asn)
+
+                close_databases()
+
+                city_updated = False
+                for mmdb_path in extract_path_city.rglob("*.mmdb"):
+                    mmdb_path.replace(GEOIP_CITY_DB)
+                    logging.info("City DB updated: %s", GEOIP_CITY_DB)
+                    city_updated = True
+                    break
+                if not city_updated:
+                    logging.error("No City MMDB found in archive.")
+
+                asn_updated = False
+                for mmdb_path in extract_path_asn.rglob("*.mmdb"):
+                    mmdb_path.replace(GEOIP_ASN_DB)
+                    logging.info("ASN DB updated: %s", GEOIP_ASN_DB)
+                    asn_updated = True
+                    break
+                if not asn_updated:
+                    logging.error("No ASN MMDB found in archive.")
+
+                load_databases()
+                logging.info("MaxMind update complete.")
+
+                # Cleanup artifacts
+                try:
+                    GEOIP_CITY_ARCHIVE.unlink(missing_ok=True)
+                    GEOIP_ASN_ARCHIVE.unlink(missing_ok=True)
+                    shutil.rmtree(extract_path_city, ignore_errors=True)
+                    shutil.rmtree(extract_path_asn, ignore_errors=True)
+                    logging.info("Old downloaded DBs cleaned up.")
+                except Exception as e:
+                    logging.warning("Cleanup error: %s", e)
 
     update_ipinfo_lite()
 
@@ -193,6 +209,12 @@ def load_ipinfo_lite() -> None:
 
 
 def update_ipinfo_lite() -> None:
+    if not IPINFO_TOKEN:
+        logging.error("IPINFO_TOKEN is not configured; cannot download IPinfo Lite DB.")
+        return
+    if _is_recent(IPINFO_LITE_DB, IPINFO_REFRESH_INTERVAL):
+        logging.info("IPinfo Lite DB is fresh (<24h); skipping download.")
+        return
     logging.info("Updating IPinfo Lite database…")
     params = {"token": IPINFO_TOKEN}
     try:

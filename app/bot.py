@@ -29,7 +29,7 @@ from .config import API_TOKEN, WEBHOOK_DOMAIN, WEBHOOK_PATH, WEBHOOK_SECRET, WEB
 
 PROXY_SCHEMES = r'(?:vless|vmess|ss|trojan)'
 DOMAIN_LABEL_PATTERN = r'(?:[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)'
-DOMAIN_PATTERN = rf'(?:{DOMAIN_LABEL_PATTERN}\.)+[A-Za-z]{2,63}'
+DOMAIN_PATTERN = r'(?:' + DOMAIN_LABEL_PATTERN + r'\.)+[A-Za-z]{2,63}'
 
 DOH_ENDPOINT = "https://1.1.1.1/dns-query"
 DNS_RECORD_TYPES = ("A", "AAAA")
