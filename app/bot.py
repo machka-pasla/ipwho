@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
 from aiogram.types import (
     InlineQuery,
@@ -45,7 +46,7 @@ WHOIS_TLD_MAP = {
 
 _ip_state_store: dict[str, dict[str, Any]] = {}
 
-bot = Bot(token=API_TOKEN, parse_mode='HTML')
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher()
 
 
