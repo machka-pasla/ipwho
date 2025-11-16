@@ -12,7 +12,7 @@ import html
 from typing import Any, Optional
 
 import aiohttp
-from aiogram import Bot, Dispatcher, F, types
+from aiogram import Bot, Dispatcher, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
 from aiogram.types import (
@@ -221,10 +221,21 @@ def to_punycode(domain: str) -> str:
         return domain
 
 
-def build_whois_url(host: str) -> str | None:
+def get_registrable_domain(host: str) -> str | None:
     if not is_domain_name(host):
         return None
     puny = to_punycode(host)
+    parts = puny.split('.')
+    if len(parts) >= 2:
+        return '.'.join(parts[-2:])
+    return puny
+
+
+def build_whois_url(host: str) -> str | None:
+    domain = get_registrable_domain(host)
+    if not domain:
+        return None
+    puny = to_punycode(domain)
     tld = puny.rsplit('.', 1)[-1].lower()
     template = WHOIS_TLD_MAP.get(tld)
     if template:
@@ -424,7 +435,8 @@ async def build_host_response(host: str, ips: list[str],
 @dp.message(Command("start"))
 async def start_handler(m: types.Message):
     await m.answer(
-        "Hi!\n\nI check geo info for domains/IPs and parse vless/vmess/ss/trojan links."
+        "Hi!\n\nI check geo info for domains/IPs and parse vless/vmess/ss/trojan links.",
+        disable_web_page_preview=True,
     )
 
 
@@ -463,9 +475,12 @@ def create_keyboard(host: str, ip: str,
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
-@dp.callback_query(F.data.startswith("nav|"))
+@dp.callback_query()
 async def ip_nav_handler(cb: types.CallbackQuery):
     data = cb.data or ""
+    if not data.startswith("nav|"):
+        await cb.answer()
+        return
     parts = data.split("|")
     if len(parts) != 3:
         await cb.answer("Bad data", show_alert=False)
@@ -497,12 +512,16 @@ async def ip_nav_handler(cb: types.CallbackQuery):
 
     try:
         if cb.message:
-            await cb.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
+            await cb.message.edit_text(text,
+                                       reply_markup=keyboard,
+                                       parse_mode='HTML',
+                                       disable_web_page_preview=True)
         elif cb.inline_message_id:
             await bot.edit_message_text(text=text,
                                         inline_message_id=cb.inline_message_id,
                                         reply_markup=keyboard,
-                                        parse_mode='HTML')
+                                        parse_mode='HTML',
+                                        disable_web_page_preview=True)
     except Exception as e:
         logging.warning(f"Failed to edit message for {host}: {e}")
 
@@ -512,7 +531,7 @@ async def ip_nav_handler(cb: types.CallbackQuery):
 @dp.message()
 async def msg_handler(m: types.Message):
     if m.text is None:
-        await m.answer("Unsupported message.")
+        await m.answer("Unsupported message.", disable_web_page_preview=True)
         return
 
     txt = m.text.strip()
@@ -528,13 +547,13 @@ async def msg_handler(m: types.Message):
                 res0 = await resolve_hostname(sub_host)
                 if res0:
                     t0, kb0 = await build_host_response(sub_host, res0, extras=None)
-                    await m.answer(t0, reply_markup=kb0)
+                    await m.answer(t0, reply_markup=kb0, disable_web_page_preview=True)
                     await asyncio.sleep(0.35)
 
             for i, inf in enumerate(sub_infos):
                 if (res := await resolve_hostname(inf['host'])):
                     t, kb = await build_host_response(inf['host'], res, extras=inf)
-                    await m.answer(t, reply_markup=kb)
+                    await m.answer(t, reply_markup=kb, disable_web_page_preview=True)
                 if i < len(sub_infos) - 1:
                     await asyncio.sleep(0.35)
             return
@@ -542,14 +561,14 @@ async def msg_handler(m: types.Message):
     # ----------- Обычный текст -----------
     resolved, extras_map = await parse_message_text(txt)
     if not resolved:
-        await m.answer("No domains/IPs found.")
+        await m.answer("No domains/IPs found.", disable_web_page_preview=True)
         return
 
     for i, (h, ips) in enumerate(resolved):
         extras_list = extras_map.get(normalize_host_key(h))
         ex = extras_list[0] if extras_list else None
         t, kb = await build_host_response(h, ips, ex)
-        await m.answer(t, reply_markup=kb)
+        await m.answer(t, reply_markup=kb, disable_web_page_preview=True)
         if len(resolved) > 1 and i < len(resolved) - 1:
             await asyncio.sleep(0.3)
 
@@ -590,7 +609,8 @@ async def inline_q(q: InlineQuery):
                 description=desc,
                 input_message_content=InputTextMessageContent(
                     message_text=txt,
-                    parse_mode='HTML'),
+                    parse_mode='HTML',
+                    disable_web_page_preview=True),
                 reply_markup=kb
             ))
         else:
