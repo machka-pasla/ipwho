@@ -583,20 +583,23 @@ async def msg_handler(m: types.Message):
 
     txt = m.text.strip()
     is_http_url = txt.lower().startswith(("http://", "https://"))
+    sent_hosts: set[str] = set()
 
     # ----------- Подписка -----------
     if is_http_url:
-        sub_infos = await fetch_and_process_subscription(txt)
-        if sub_infos:
-            # Сначала показать инфо по домену подписки
-            sub_host = extract_host_from_link(txt)
-            if sub_host:
+        sub_host = extract_host_from_link(txt)
+        if sub_host:
+            norm_sub_host = normalize_host_key(sub_host)
+            if norm_sub_host not in sent_hosts:
                 res0 = await resolve_hostname(sub_host)
                 if res0:
                     t0, kb0 = await build_host_response(sub_host, res0, extras=None)
                     await m.answer(t0, reply_markup=kb0, disable_web_page_preview=True)
+                    sent_hosts.add(norm_sub_host)
                     await asyncio.sleep(0.35)
 
+        sub_infos = await fetch_and_process_subscription(txt)
+        if sub_infos:
             for i, inf in enumerate(sub_infos):
                 if (res := await resolve_hostname(inf['host'])):
                     t, kb = await build_host_response(inf['host'], res, extras=inf)
@@ -607,16 +610,25 @@ async def msg_handler(m: types.Message):
 
     # ----------- Обычный текст -----------
     resolved, extras_map = await parse_message_text(txt)
-    if not resolved:
+    filtered_resolved: list[tuple[str, list[str]]] = []
+    for host, ips in resolved:
+        if normalize_host_key(host) in sent_hosts:
+            continue
+        filtered_resolved.append((host, ips))
+
+    if not filtered_resolved:
+        if sent_hosts:
+            return
         await m.answer("No domains/IPs found.", disable_web_page_preview=True)
         return
 
-    for i, (h, ips) in enumerate(resolved):
+    for i, (h, ips) in enumerate(filtered_resolved):
         extras_list = extras_map.get(normalize_host_key(h))
         ex = extras_list[0] if extras_list else None
         t, kb = await build_host_response(h, ips, ex)
         await m.answer(t, reply_markup=kb, disable_web_page_preview=True)
-        if len(resolved) > 1 and i < len(resolved) - 1:
+        sent_hosts.add(normalize_host_key(h))
+        if len(filtered_resolved) > 1 and i < len(filtered_resolved) - 1:
             await asyncio.sleep(0.3)
 
 
@@ -685,7 +697,7 @@ async def fetch_and_process_subscription(url: str) -> list[dict] | None:
                     return None
                 raw = await r.read()
     except Exception as e:
-        logging.error(f"Sub fetch error {url}: {e}")
+        logging.warning(f"Sub fetch error {url}: {e}")
         return None
 
     infos: list[dict] = []
