@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command, Text
+from aiogram.filters import Command
 from aiogram.types import (
     InlineQuery,
     InlineQueryResultArticle,
@@ -413,9 +413,11 @@ def create_keyboard(host: str, ip: str,
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
-@dp.callback_query(Text(startswith="nav|"))
+@dp.callback_query()
 async def ip_nav_handler(cb: types.CallbackQuery):
     data = cb.data or ""
+    if not data.startswith("nav|"):
+        return
     parts = data.split("|")
     if len(parts) != 3:
         await cb.answer("Bad data", show_alert=False)
