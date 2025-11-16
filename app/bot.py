@@ -28,6 +28,8 @@ from aiohttp import web
 from .config import API_TOKEN, WEBHOOK_DOMAIN, WEBHOOK_PATH, WEBHOOK_SECRET, WEBHOOK_PORT
 
 PROXY_SCHEMES = r'(?:vless|vmess|ss|trojan)'
+DOMAIN_LABEL_PATTERN = r'(?:[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)'
+DOMAIN_PATTERN = rf'(?:{DOMAIN_LABEL_PATTERN}\.)+[A-Za-z]{2,63}'
 
 DOH_ENDPOINT = "https://1.1.1.1/dns-query"
 DNS_RECORD_TYPES = ("A", "AAAA")
@@ -87,7 +89,7 @@ def classify_local_ip(val: str) -> str | None:
 def is_domain_name(val: str) -> bool:
     if is_ipv4(val) or is_ipv6(val):
         return False
-    return bool(re.fullmatch(r'(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}', val))
+    return bool(re.fullmatch(DOMAIN_PATTERN, val))
 
 
 async def resolve_hostname(host: str) -> Optional[list[str]]:
@@ -260,8 +262,7 @@ async def parse_message_text(text: str) -> tuple[list[tuple[str, list[str]]],
         if (info := parse_proxy_link(link)):
             extras_map.setdefault(normalize_host_key(info['host']), []).append(info)
 
-    domain_rx = (r'(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+'
-                 r'[A-Za-z]{2,63}')
+    domain_rx = DOMAIN_PATTERN
     items = re.findall(
         rf'{PROXY_SCHEMES}://[^\s]+|https?://[^\s]+|{domain_rx}|'
         rf'(?:\d{{1,3}}\.){{3}}\d{{1,3}}|'
@@ -365,6 +366,11 @@ async def build_info_text(host: str, ip: str, extras: dict | None) -> str:
     org_val = ii.get('org', '')
     if org_val:
         ii_lines.append(html_escape(format_org(org_val)))
+
+    if not mm1 and not ii1:
+        lines.append("")
+        lines.append("No geo data")
+        return "\n".join(lines)
 
     if mm_lines:
         lines.append("")
