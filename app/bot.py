@@ -538,6 +538,15 @@ async def ip_nav_handler(cb: types.CallbackQuery):
     host = state.get('host') or ''
     extras = state.get('extras')
     ip = ips[target_idx]
+    logging.info(
+        "Nav callback: host=%s ip=%s idx=%s/%s msg_id=%s inline_id=%s",
+        host,
+        ip,
+        target_idx,
+        len(ips),
+        getattr(cb.message, 'message_id', None) if cb.message else None,
+        cb.inline_message_id,
+    )
     text = await build_info_text(host, ip, extras)
     nav_info = {'state_id': state_id, 'index': target_idx, 'total': len(ips)}
     keyboard = create_keyboard(host, ip, nav_info)
@@ -751,10 +760,13 @@ async def on_startup(app: web.Application):
         base = 'https://' + base
     webhook_url = base.rstrip('/') + WEBHOOK_PATH
     try:
+        webhook_kwargs = {
+            'url': webhook_url,
+            'allowed_updates': ["message", "inline_query", "callback_query"],
+        }
         if WEBHOOK_SECRET:
-            await bot.set_webhook(url=webhook_url, secret_token=WEBHOOK_SECRET)
-        else:
-            await bot.set_webhook(url=webhook_url)
+            webhook_kwargs['secret_token'] = WEBHOOK_SECRET
+        await bot.set_webhook(**webhook_kwargs)
         logging.info(f"Webhook set: {webhook_url}")
     except Exception as e:
         logging.error(f"Failed to set webhook: {e}")
