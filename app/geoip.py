@@ -105,66 +105,66 @@ def extract_tar_gz(archive_path: Path, extract_path: Path) -> None:
 def update_databases() -> None:
     if not LICENSE_KEY:
         logging.error("LICENSE_KEY is not configured; cannot update MaxMind databases.")
-        return
+    else:
+        url_city = (
+            "https://download.maxmind.com/app/geoip_download?"
+            f"edition_id=GeoLite2-City&license_key={LICENSE_KEY}&suffix=tar.gz"
+        )
+        url_asn = (
+            "https://download.maxmind.com/app/geoip_download?"
+            f"edition_id=GeoLite2-ASN&license_key={LICENSE_KEY}&suffix=tar.gz"
+        )
 
-    url_city = (
-        "https://download.maxmind.com/app/geoip_download?"
-        f"edition_id=GeoLite2-City&license_key={LICENSE_KEY}&suffix=tar.gz"
-    )
-    url_asn = (
-        "https://download.maxmind.com/app/geoip_download?"
-        f"edition_id=GeoLite2-ASN&license_key={LICENSE_KEY}&suffix=tar.gz"
-    )
+        logging.info("Updating MaxMind databases…")
+        download_db(url_city, GEOIP_CITY_ARCHIVE)
+        download_db(url_asn, GEOIP_ASN_ARCHIVE)
 
-    logging.info("Updating MaxMind databases…")
-    download_db(url_city, GEOIP_CITY_ARCHIVE)
-    download_db(url_asn, GEOIP_ASN_ARCHIVE)
+        if not GEOIP_CITY_ARCHIVE.exists() or not GEOIP_ASN_ARCHIVE.exists():
+            logging.error("MaxMind archive download failed; aborting update.")
+        else:
+            extract_path_city = MAXMIND_TMP_PATH / "GeoLite2-City"
+            extract_path_asn = MAXMIND_TMP_PATH / "GeoLite2-ASN"
 
-    if not GEOIP_CITY_ARCHIVE.exists() or not GEOIP_ASN_ARCHIVE.exists():
-        logging.error("MaxMind archive download failed; aborting update.")
-        return
+            shutil.rmtree(extract_path_city, ignore_errors=True)
+            shutil.rmtree(extract_path_asn, ignore_errors=True)
 
-    extract_path_city = MAXMIND_TMP_PATH / "GeoLite2-City"
-    extract_path_asn = MAXMIND_TMP_PATH / "GeoLite2-ASN"
+            extract_tar_gz(GEOIP_CITY_ARCHIVE, extract_path_city)
+            extract_tar_gz(GEOIP_ASN_ARCHIVE, extract_path_asn)
 
-    shutil.rmtree(extract_path_city, ignore_errors=True)
-    shutil.rmtree(extract_path_asn, ignore_errors=True)
+            close_databases()
 
-    extract_tar_gz(GEOIP_CITY_ARCHIVE, extract_path_city)
-    extract_tar_gz(GEOIP_ASN_ARCHIVE, extract_path_asn)
+            city_updated = False
+            for mmdb_path in extract_path_city.rglob("*.mmdb"):
+                mmdb_path.replace(GEOIP_CITY_DB)
+                logging.info("City DB updated: %s", GEOIP_CITY_DB)
+                city_updated = True
+                break
+            if not city_updated:
+                logging.error("No City MMDB found in archive.")
 
-    close_databases()
+            asn_updated = False
+            for mmdb_path in extract_path_asn.rglob("*.mmdb"):
+                mmdb_path.replace(GEOIP_ASN_DB)
+                logging.info("ASN DB updated: %s", GEOIP_ASN_DB)
+                asn_updated = True
+                break
+            if not asn_updated:
+                logging.error("No ASN MMDB found in archive.")
 
-    city_updated = False
-    for mmdb_path in extract_path_city.rglob("*.mmdb"):
-        mmdb_path.replace(GEOIP_CITY_DB)
-        logging.info("City DB updated: %s", GEOIP_CITY_DB)
-        city_updated = True
-        break
-    if not city_updated:
-        logging.error("No City MMDB found in archive.")
+            load_databases()
+            logging.info("MaxMind update complete.")
 
-    asn_updated = False
-    for mmdb_path in extract_path_asn.rglob("*.mmdb"):
-        mmdb_path.replace(GEOIP_ASN_DB)
-        logging.info("ASN DB updated: %s", GEOIP_ASN_DB)
-        asn_updated = True
-        break
-    if not asn_updated:
-        logging.error("No ASN MMDB found in archive.")
+            # Cleanup artifacts
+            try:
+                GEOIP_CITY_ARCHIVE.unlink(missing_ok=True)
+                GEOIP_ASN_ARCHIVE.unlink(missing_ok=True)
+                shutil.rmtree(extract_path_city, ignore_errors=True)
+                shutil.rmtree(extract_path_asn, ignore_errors=True)
+                logging.info("Old downloaded DBs cleaned up.")
+            except Exception as e:
+                logging.warning("Cleanup error: %s", e)
 
-    load_databases()
-    logging.info("MaxMind update complete.")
-
-    # Cleanup artifacts
-    try:
-        GEOIP_CITY_ARCHIVE.unlink(missing_ok=True)
-        GEOIP_ASN_ARCHIVE.unlink(missing_ok=True)
-        shutil.rmtree(extract_path_city, ignore_errors=True)
-        shutil.rmtree(extract_path_asn, ignore_errors=True)
-        logging.info("Old downloaded DBs cleaned up.")
-    except Exception as e:
-        logging.warning("Cleanup error: %s", e)
+    update_ipinfo_lite()
 
 
 def load_ipinfo_lite() -> None:
@@ -178,7 +178,8 @@ def load_ipinfo_lite() -> None:
 
 
 def update_ipinfo_lite() -> None:
-    params = {"token": IPINFO_TOKEN} if IPINFO_TOKEN else None
+    logging.info("Updating IPinfo Lite database…")
+    params = {"token": IPINFO_TOKEN}
     try:
         response = requests.get(IPINFO_LITE_BASE, params=params, stream=True, timeout=60)
         response.raise_for_status()
@@ -189,6 +190,29 @@ def update_ipinfo_lite() -> None:
     except Exception as e:
         logging.error("IPinfo Lite download error: %s", e)
     load_ipinfo_lite()
+
+
+def ipinfo_lite_lookup(ip: str) -> dict | None:
+    if ipinfo_lite_reader is None:
+        return None
+    try:
+        rec = ipinfo_lite_reader.get(ip) or {}
+    except Exception as e:
+        logging.error("IPinfo Lite lookup error for %s: %s", ip, e)
+        return None
+    if not rec:
+        return None
+    country_code = (rec.get("country", "") or "").upper()
+    return {
+        "country": country_code,
+        "country_name": get_country_name(country_code),
+        "region": rec.get("region", ""),
+        "city": rec.get("city", ""),
+        "org": rec.get("org", ""),
+        "loc": rec.get("loc", ""),
+        "postal": rec.get("postal", ""),
+        "timezone": rec.get("timezone", ""),
+    }
 
 
 def get_geoip_info(ip):
@@ -221,33 +245,34 @@ def get_asn_info(ip):
 
 
 def get_ipinfo_info(ip):
-    params = {"token": IPINFO_TOKEN} if IPINFO_TOKEN else None
+    fallback = ipinfo_lite_lookup(ip)
+    params = {"token": IPINFO_TOKEN}
     try:
         r = requests.get(f"https://ipinfo.io/{ip}/json", params=params, timeout=10)
         r.raise_for_status()
         data = r.json()
+        if not isinstance(data, dict):
+            raise ValueError("Unexpected IPinfo response")
+        if data.get("error") or data.get("bogon"):
+            raise ValueError(str(data.get("error") or "No data from IPinfo"))
+
         country_code = (data.get("country") or "").upper()
         data["country"] = country_code
-        if country_code and not data.get("country_name"):
-            data["country_name"] = get_country_name(country_code)
-        elif not country_code:
-            data["country_name"] = data.get("country_name", "")
+        if country_code:
+            data["country_name"] = data.get("country_name") or get_country_name(country_code)
+        elif fallback:
+            data["country"] = fallback.get("country", "")
+            data["country_name"] = fallback.get("country_name", "")
+        else:
+            raise ValueError("IPinfo response missing country data")
+
+        if fallback:
+            for field in ("city", "region", "loc", "org", "postal", "timezone"):
+                if not data.get(field) and fallback.get(field):
+                    data[field] = fallback[field]
         return data
     except Exception as e:
-        if ipinfo_lite_reader is not None:
-            try:
-                rec = ipinfo_lite_reader.get(ip) or {}
-                country_code = (rec.get("country", "") or "").upper()
-                return {
-                    "country": country_code,
-                    "country_name": get_country_name(country_code),
-                    "region": rec.get("region", ""),
-                    "city": rec.get("city", ""),
-                    "org": rec.get("org", ""),
-                    "loc": rec.get("loc", ""),
-                    "postal": rec.get("postal", ""),
-                    "timezone": rec.get("timezone", ""),
-                }
-            except Exception:
-                pass
+        if fallback:
+            logging.warning("Using IPinfo Lite fallback for %s: %s", ip, e)
+            return fallback
         return {"error": str(e)}

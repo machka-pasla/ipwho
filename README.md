@@ -64,12 +64,14 @@ docker compose down && docker compose up -d
 Set these in your `.env` file:
 
 - `LICENSE_KEY`: MaxMind GeoLite2 license key (required for DB updates)
-- `IPINFO_TOKEN` (optional): IPinfo token for IPinfo Lite DB downloads
+- `IPINFO_TOKEN`: IPinfo API token (required). Used for live API lookups and to download/refresh the IPinfo Lite MMDB.
 - `API_TOKEN`: Telegram bot token
 - `WEBHOOK_DOMAIN`: Public domain/URL reachable by Telegram (e.g. `example.com` or `https://example.com`)
 - `WEBHOOK_PATH` (optional): Custom webhook path, e.g. `/bot/<token>`
 - `WEBHOOK_SECRET` (optional): Secret for webhook verification
 - `WEBHOOK_PORT` (default `8080`): Port the bot listens on
+
+IPinfo data is fetched via the authenticated API first; if the API sends no data (rate limit, bogon, etc.), the service transparently falls back to the locally cached IPinfo Lite database stored under `./data` on the host and mounted into both containers.
 
 ### Services
 

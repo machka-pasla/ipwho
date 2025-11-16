@@ -10,7 +10,6 @@ from .geoip import (
     load_databases,
     update_databases,
     load_ipinfo_lite,
-    update_ipinfo_lite,
     get_geoip_info,
     get_asn_info,
     get_ipinfo_info,
@@ -295,13 +294,11 @@ def create_app() -> Flask:
 
 def run_app():
     load_databases()
-    update_databases()
-    update_ipinfo_lite()
     load_ipinfo_lite()
+    update_databases()
 
     scheduler = BackgroundScheduler()
     scheduler.add_job(update_databases, 'interval', seconds=86400)
-    scheduler.add_job(update_ipinfo_lite, 'interval', seconds=86400)
     scheduler.start()
 
     logging.getLogger('werkzeug').setLevel(logging.ERROR)
