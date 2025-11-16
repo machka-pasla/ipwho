@@ -26,8 +26,13 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 
 from .config import API_TOKEN, WEBHOOK_DOMAIN, WEBHOOK_PATH, WEBHOOK_SECRET, WEBHOOK_PORT
+from .proxy_utils import (
+    PROXY_SCHEMES as PROXY_SCHEME_LIST,
+    extract_proxy_uris,
+    parse_proxy_uri,
+)
 
-PROXY_SCHEMES = r'(?:vless|vmess|ss|trojan)'
+PROXY_SCHEMES = r'(?:' + '|'.join(PROXY_SCHEME_LIST) + ')'
 DOMAIN_LABEL_PATTERN = r'(?:[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)'
 DOMAIN_PATTERN = r'(?:' + DOMAIN_LABEL_PATTERN + r'\.)+[A-Za-z]{2,63}'
 
@@ -154,56 +159,21 @@ def format_org(org: str) -> str:
 
 def parse_proxy_link(link: str) -> dict | None:
     """
-    Вернуть dict: {scheme, host, port, sni}
+    Вернуть dict с ключами parse_proxy_uri (protocol, server, port, sni, ...).
     """
-    m = re.match(r'^(?P<scheme>vless|vmess|ss|trojan)://(?P<body>.+)$',
-                 link, re.I)
-    if not m:
+    info = parse_proxy_uri(link)
+    server = info.get('server')
+    if not server:
         return None
-    scheme = m.group('scheme').lower()
-    body = m.group('body')
-    host = port = sni = None
-
-    if scheme in ('vless', 'trojan', 'ss'):
-        m2 = re.match(r'[^@]+@(?P<host>[^:/?#]+)(?::(?P<port>\d+))?'
-                      r'(?:\?(?P<q>[^#]+))?', body)
-        if m2:
-            host = m2.group('host')
-            port = m2.group('port')
-            q = m2.group('q')
-            if q:
-                params = dict(kv.split('=', 1) for kv in q.split('&')
-                              if '=' in kv)
-                if params.get('security', '').lower() == 'reality':
-                    sni = (params.get('sni') or params.get('serverName')
-                           or params.get('server_name'))
-    elif scheme == 'vmess':
-        try:
-            payload = body.split('#')[0].split('?')[0]
-            if (pad := len(payload) % 4):
-                payload += '=' * (4 - pad)
-            decoded = base64.b64decode(payload).decode('utf-8',
-                                                       errors='ignore')
-            j = json.loads(decoded)
-            host = j.get('add')
-            port = str(j.get('port')) if j.get('port') else None
-            sni = (j.get('sni') or j.get('serverName')
-                   or j.get('server_name') or j.get('host'))
-        except Exception:
-            pass
-
-    # новый дефолт: если это VLESS-Reality, но SNI не указан, берём host
-    if scheme == 'vless' and host and not sni:
-        sni = host
-
-    return {'scheme': scheme, 'host': host, 'port': port, 'sni': sni} \
-           if host else None
+    if info.get('protocol') == 'vless' and not info.get('sni'):
+        info['sni'] = server
+    return info
 
 
 def extract_host_from_link(link: str) -> str | None:
     info = parse_proxy_link(link)
     if info:
-        return info['host']
+        return info.get('server')
     # IPv6 в URL может быть в квадратных скобках
     m = re.search(r'https?://\[(?P<ip>[^\]]+)\]', link)
     if m:
@@ -258,9 +228,11 @@ def strip_html(text: str) -> str:
 async def parse_message_text(text: str) -> tuple[list[tuple[str, list[str]]],
                                                  dict[str, list[dict]]]:
     extras_map: dict[str, list[dict]] = {}
-    for link in re.findall(fr'{PROXY_SCHEMES}://[^\s]+', text, flags=re.I):
-        if (info := parse_proxy_link(link)):
-            extras_map.setdefault(normalize_host_key(info['host']), []).append(info)
+    for link in extract_proxy_uris(text):
+        if info := parse_proxy_link(link):
+            server = info.get('server')
+            if server:
+                extras_map.setdefault(normalize_host_key(server), []).append(info)
 
     domain_rx = DOMAIN_PATTERN
     items = re.findall(
@@ -296,28 +268,35 @@ async def parse_message_text(text: str) -> tuple[list[tuple[str, list[str]]],
 async def build_info_text(host: str, ip: str, extras: dict | None) -> str:
     data = await fetch_ip_info(ip)
     host_safe = html_escape(host)
-    whois_url = build_whois_url(host)
     lines: list[str] = []
-    if whois_url:
-        lines.append(f"<code>{host_safe}</code> (<a href=\"{whois_url}\">who.is</a>)")
-    else:
+
+    def add_blank_line() -> None:
+        if lines and lines[-1] != "":
+            lines.append("")
+
+    if extras:
+        comment = extras.get('comment')
+        if comment:
+            suffix = "…" if extras.get('comment_truncated') else ""
+            lines.append(html_escape(f"{comment}{suffix}"))
+    config_lines: list[str] = []
+    if extras:
+        for key in ("protocol", "server", "port", "type", "security", "sni", "host", "method"):
+            val = extras.get(key)
+            if val is None:
+                continue
+            if isinstance(val, str) and not val.strip():
+                continue
+            config_lines.append(f"{key}={val}")
+    if config_lines:
+        add_blank_line()
+        lines.extend(html_escape(line) for line in config_lines)
+
+    if host and host != ip:
+        add_blank_line()
         lines.append(f"<code>{host_safe}</code>")
 
-    extra_lines: list[str] = []
-    if extras:
-        scheme = extras.get('scheme')
-        port = extras.get('port')
-        sni = extras.get('sni') or (host if scheme == 'vless' else None)
-        if port:
-            extra_lines.append(f"Port: {html_escape(str(port))}")
-        if scheme:
-            extra_lines.append(f"Type: {html_escape(str(scheme))}")
-        if sni:
-            extra_lines.append(f"SNI: {html_escape(str(sni))}")
-    if extra_lines:
-        lines.extend(extra_lines)
-
-    lines.append("")
+    add_blank_line()
     lines.append(f"<code>{html_escape(ip)}</code>")
 
     if not data:
@@ -367,19 +346,16 @@ async def build_info_text(host: str, ip: str, extras: dict | None) -> str:
     if org_val:
         ii_lines.append(html_escape(format_org(org_val)))
 
-    if not mm1 and not ii1:
-        lines.append("")
-        lines.append("No geo data")
-        return "\n".join(lines)
+    def append_geo_section(title: str, entries: list[str]) -> None:
+        add_blank_line()
+        lines.append(title)
+        if entries:
+            lines.extend(entries)
+        else:
+            lines.append("No geo info")
 
-    if mm_lines:
-        lines.append("")
-        lines.append("MaxMind")
-        lines.extend(mm_lines)
-    if ii_lines:
-        lines.append("")
-        lines.append("IPinfo")
-        lines.extend(ii_lines)
+    append_geo_section("MaxMind", mm_lines)
+    append_geo_section("IPinfo", ii_lines)
 
     return "\n".join(lines)
 
@@ -405,6 +381,7 @@ def _normalize_extras_for_state(extras: dict | None) -> dict:
         return {}
     clean = extras.copy()
     clean.pop('host', None)
+    clean.pop('server', None)
     return clean
 
 
@@ -601,8 +578,11 @@ async def msg_handler(m: types.Message):
         sub_infos = await fetch_and_process_subscription(txt)
         if sub_infos:
             for i, inf in enumerate(sub_infos):
-                if (res := await resolve_hostname(inf['host'])):
-                    t, kb = await build_host_response(inf['host'], res, extras=inf)
+                server = inf.get('server')
+                if not server:
+                    continue
+                if (res := await resolve_hostname(server)):
+                    t, kb = await build_host_response(server, res, extras=inf)
                     await m.answer(t, reply_markup=kb, disable_web_page_preview=True)
                 if i < len(sub_infos) - 1:
                     await asyncio.sleep(0.35)
@@ -684,11 +664,11 @@ async def inline_q(q: InlineQuery):
 
 async def fetch_and_process_subscription(url: str) -> list[dict] | None:
     """
-    Вернёт список extras-dict'ов (scheme, host, port, sni) — dups сохраняются.
+    Вернёт список extras-dict'ов (protocol, server, port, sni, ...).
     """
     headers = {
-        'User-Agent': 'Happ/2.1.3/ios CFNetwork/3826.500.131 Darwin/24.5.0',
-        'X-HWID': 'b16ae9eb-8434-4278-ad61-74567517091f'
+        'User-Agent': 'ip-who-bot/1.0',
+        'X-HWID': 'b16ae9eb-8434-4278-ad61-74567517091f',
     }
     try:
         async with aiohttp.ClientSession(headers=headers) as s:
@@ -705,8 +685,8 @@ async def fetch_and_process_subscription(url: str) -> list[dict] | None:
     # 1) Base64
     try:
         decoded = base64.b64decode(raw).decode('utf-8', errors='ignore')
-        for link in re.findall(fr'{PROXY_SCHEMES}://[^\s]+', decoded):
-            if (info := parse_proxy_link(link)):
+        for link in extract_proxy_uris(decoded):
+            if info := parse_proxy_link(link):
                 infos.append(info)
     except Exception:
         pass
@@ -728,22 +708,24 @@ async def fetch_and_process_subscription(url: str) -> list[dict] | None:
                     for ob in outs:
                         if not isinstance(ob, dict):
                             continue
-                        proto = ob.get("protocol", "").lower()
+                        proto_raw = ob.get("protocol", "").lower()
+                        proto = 'ss' if proto_raw == 'shadowsocks' else proto_raw
                         settings = ob.get("settings", {})
+                        srv = None
+                        stream = ob.get("streamSettings", {})
                         vnext = settings.get("vnext")
-                        addr = port = None
+                        addr = None
+                        port_val: str | int | None = None
                         if isinstance(vnext, list) and vnext and \
                                 isinstance(vnext[0], dict):
                             addr = vnext[0].get("address")
-                            port = str(vnext[0].get("port") or '') \
-                                   if addr else None
-                        elif proto in ["shadowsocks", "trojan"]:
+                            port_val = vnext[0].get("port")
+                        elif proto in ["ss", "trojan"]:
                             srv = settings.get("servers")
                             if isinstance(srv, list) and srv and \
                                     isinstance(srv[0], dict):
                                 addr = srv[0].get("address")
-                                port = str(srv[0].get("port") or '') \
-                                       if addr else None
+                                port_val = srv[0].get("port")
                         if not addr:
                             continue
                         # ---- SNI поиск ----
@@ -752,17 +734,42 @@ async def fetch_and_process_subscription(url: str) -> list[dict] | None:
                                or settings.get("server_name")
                                or settings.get("sni"))
                         if not sni:
-                            ss = ob.get("streamSettings", {})
-                            rs = ss.get("realitySettings", {})
+                            rs = stream.get("realitySettings", {})
                             sni = (rs.get("serverName")
                                    or rs.get("server_name")
                                    or rs.get("sni"))
                         if proto == 'vless' and not sni:
                             sni = addr
-                        infos.append({'scheme': proto,
-                                      'host': addr,
-                                      'port': port,
-                                      'sni': sni})
+                        network_type = (
+                            stream.get("network")
+                            or ob.get("network")
+                            or ob.get("type")
+                        )
+                        security = stream.get("security")
+                        method = None
+                        if proto == 'ss':
+                            method = (
+                                settings.get("method")
+                                or (srv and isinstance(srv, list) and srv and
+                                    isinstance(srv[0], dict) and srv[0].get("method"))
+                            )
+                        comment = (
+                            ob.get("tag")
+                            or ob.get("name")
+                            or item.get("remarks")
+                            or item.get("name")
+                        )
+                        info = {
+                            'protocol': proto or None,
+                            'server': addr,
+                            'port': port_val,
+                            'sni': sni,
+                            'type': network_type,
+                            'security': security,
+                            'method': method,
+                            'comment': comment,
+                        }
+                        infos.append({k: v for k, v in info.items() if v not in (None, '')})
     except Exception:
         pass
 
