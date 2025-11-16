@@ -287,10 +287,14 @@ async def build_info_text(host: str, ip: str, extras: dict | None) -> str:
                 continue
             if isinstance(val, str) and not val.strip():
                 continue
-            config_lines.append(f"{key}={val}")
+            safe_val = html_escape(str(val))
+            if key == "sni":
+                config_lines.append(f"{key}=<code>{safe_val}</code>")
+            else:
+                config_lines.append(f"{key}={safe_val}")
     if config_lines:
         add_blank_line()
-        lines.extend(html_escape(line) for line in config_lines)
+        lines.extend(config_lines)
 
     if host and host != ip:
         add_blank_line()

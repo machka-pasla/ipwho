@@ -38,6 +38,7 @@ IPINFO_REFRESH_INTERVAL = 86400  # seconds
 city_reader = None
 asn_reader = None
 ipinfo_lite_reader = None
+_maxmind_staleness_log: dict[str, float] = {}
 
 
 def load_databases():
@@ -113,6 +114,22 @@ def _is_recent(path: Path, max_age: int) -> bool:
         return (time.time() - path.stat().st_mtime) < max_age
     except OSError:
         return False
+
+
+def _maxmind_db_is_fresh(db_path: Path, label: str) -> bool:
+    if _is_recent(db_path, MAXMIND_REFRESH_INTERVAL):
+        _maxmind_staleness_log.pop(label, None)
+        return True
+    now = time.time()
+    last = _maxmind_staleness_log.get(label, 0)
+    if now - last > 300:
+        logging.warning(
+            "%s database is older than %s seconds; skipping lookups until refreshed.",
+            label,
+            MAXMIND_REFRESH_INTERVAL,
+        )
+        _maxmind_staleness_log[label] = now
+    return False
 
 
 def update_databases() -> None:
@@ -255,6 +272,8 @@ def ipinfo_lite_lookup(ip: str) -> dict | None:
 def get_geoip_info(ip):
     if city_reader is None:
         return {"error": "City database not loaded"}
+    if not _maxmind_db_is_fresh(GEOIP_CITY_DB, "MaxMind City"):
+        return {"error": "City database outdated"}
     try:
         response = city_reader.city(ip)
         country_code = response.country.iso_code or ""
@@ -271,6 +290,8 @@ def get_geoip_info(ip):
 def get_asn_info(ip):
     if asn_reader is None:
         return {"error": "ASN database not loaded"}
+    if not _maxmind_db_is_fresh(GEOIP_ASN_DB, "MaxMind ASN"):
+        return {"error": "ASN database outdated"}
     try:
         response = asn_reader.asn(ip)
         return {
