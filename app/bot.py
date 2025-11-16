@@ -317,7 +317,7 @@ async def build_info_text(host: str, ip: str, extras: dict | None) -> str:
         lines.extend(extra_lines)
 
     lines.append("")
-    lines.append(f"{html_escape(ip)}")
+    lines.append(f"<code>{html_escape(ip)}</code>")
 
     if not data:
         lines.append("")
@@ -394,25 +394,50 @@ def purge_ip_states() -> None:
         _ip_state_store.pop(key, None)
 
 
+def _normalize_extras_for_state(extras: dict | None) -> dict:
+    if not extras:
+        return {}
+    clean = extras.copy()
+    clean.pop('host', None)
+    return clean
+
+
+def _make_state_id(host: str, ips: list[str], extras: dict | None) -> str:
+    payload = {
+        'host': (host or '').lower(),
+        'ips': sorted(ips),
+        'extras': _normalize_extras_for_state(extras),
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]
+
+
 def register_ip_state(host: str, ips: list[str], extras: dict | None) -> str:
     purge_ip_states()
-    state_id = secrets.token_urlsafe(8)
-    _ip_state_store[state_id] = {
+    state_id = _make_state_id(host, ips, extras)
+    payload = {
         'host': host,
-        'ips': ips,
-        'extras': extras,
+        'ips': list(ips),
+        'extras': extras.copy() if extras else None,
         'created': time.time(),
     }
+    existing = _ip_state_store.get(state_id)
+    if existing:
+        existing.update(payload)
+    else:
+        _ip_state_store[state_id] = payload
     return state_id
 
 
 def get_ip_state(state_id: str) -> dict[str, Any] | None:
+    purge_ip_states()
     state = _ip_state_store.get(state_id)
     if not state:
         return None
     if time.time() - state.get('created', 0) > IP_STATE_TTL:
         _ip_state_store.pop(state_id, None)
         return None
+    state['created'] = time.time()
     return state
 
 
