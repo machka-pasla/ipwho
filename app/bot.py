@@ -456,21 +456,28 @@ def create_keyboard(host: str, ip: str,
 
     if nav_info and nav_info.get('total', 1) > 1:
         state_id = nav_info.get('state_id', '')
-        index = int(nav_info.get('index', 0))
-        total = int(nav_info.get('total', 1))
+        index = max(int(nav_info.get('index', 0)), 0)
+        total = max(int(nav_info.get('total', 1)), 1)
         nav_row: list[InlineKeyboardButton] = []
+
         if index > 0:
             nav_row.append(InlineKeyboardButton(
-                text=f"<- {index + 1}/{total}",
+                text="←",
                 callback_data=f"nav|{state_id}|{index - 1}"
             ))
+
+        nav_row.append(InlineKeyboardButton(
+            text=f"{index + 1}/{total}",
+            callback_data="noop"
+        ))
+
         if index < total - 1:
             nav_row.append(InlineKeyboardButton(
-                text=f"{index + 1}/{total} ->",
+                text="→",
                 callback_data=f"nav|{state_id}|{index + 1}"
             ))
-        if nav_row:
-            rows.append(nav_row)
+
+        rows.append(nav_row)
 
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
