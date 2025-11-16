@@ -6,11 +6,13 @@ import re
 import socket
 import json
 import ipaddress
-from typing import Optional
+import secrets
+import time
+from typing import Any, Optional
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
+from aiogram.filters import Command, Text
 from aiogram.types import (
     InlineQuery,
     InlineQueryResultArticle,
@@ -24,6 +26,14 @@ from aiohttp import web
 from .config import API_TOKEN, WEBHOOK_DOMAIN, WEBHOOK_PATH, WEBHOOK_SECRET, WEBHOOK_PORT
 
 PROXY_SCHEMES = r'(?:vless|vmess|ss|trojan)'
+
+DOH_ENDPOINT = "https://1.1.1.1/dns-query"
+DNS_RECORD_TYPES = ("A", "AAAA")
+DNS_HEADERS = {"Accept": "application/dns-json"}
+IP_STATE_TTL = 3600  # seconds
+IP_STATE_LIMIT = 512
+
+_ip_state_store: dict[str, dict[str, Any]] = {}
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
@@ -69,24 +79,45 @@ def is_domain_name(val: str) -> bool:
     return bool(re.fullmatch(r'(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}', val))
 
 
-async def resolve_hostname(host: str) -> Optional[tuple[str, str]]:
-    loop = asyncio.get_running_loop()
+async def resolve_hostname(host: str) -> Optional[list[str]]:
     if is_ipv4(host) or is_ipv6(host):
-        return host, host
-    try:
-        infos = await asyncio.wait_for(
-            loop.getaddrinfo(host, None, family=socket.AF_UNSPEC,
-                             type=socket.SOCK_STREAM),
-            timeout=5.0)
-        if not infos:
-            return None
-        for fam, *_ , sockaddr in infos:
-            if fam == socket.AF_INET:
-                return host, sockaddr[0]
-        return host, infos[0][4][0]
-    except Exception as e:
-        logging.warning(f"resolve_hostname error for {host}: {e}")
-        return None
+        return [host]
+
+    ips: list[str] = []
+    seen: set[str] = set()
+
+    async with aiohttp.ClientSession(headers=DNS_HEADERS) as session:
+        for dns_type in DNS_RECORD_TYPES:
+            try:
+                async with session.get(
+                    DOH_ENDPOINT,
+                    params={'name': host, 'type': dns_type},
+                    timeout=5,
+                ) as resp:
+                    if resp.status != 200:
+                        logging.warning(
+                            f"resolve_hostname DoH status {resp.status} for {host} [{dns_type}]"
+                        )
+                        continue
+                    data = await resp.json(content_type=None)
+            except Exception as e:
+                logging.warning(f"resolve_hostname DoH error for {host} [{dns_type}]: {e}")
+                continue
+
+            answers = data.get('Answer') or []
+            for ans in answers:
+                rtype = ans.get('type')
+                val = ans.get('data')
+                if not val:
+                    continue
+                if rtype == 1 and is_ipv4(val) and val not in seen:
+                    ips.append(val)
+                    seen.add(val)
+                elif rtype == 28 and is_ipv6(val) and val not in seen:
+                    ips.append(val)
+                    seen.add(val)
+
+    return ips if ips else None
 
 
 async def fetch_ip_info(ip: str) -> dict:
@@ -168,12 +199,16 @@ def extract_host_from_link(link: str) -> str | None:
     return m.group(1) if m else None
 
 
-async def parse_message_text(text: str) -> tuple[list[tuple[str, str]],
+def normalize_host_key(host: str) -> str:
+    return host.lower()
+
+
+async def parse_message_text(text: str) -> tuple[list[tuple[str, list[str]]],
                                                  dict[str, list[dict]]]:
     extras_map: dict[str, list[dict]] = {}
     for link in re.findall(fr'{PROXY_SCHEMES}://[^\s]+', text, flags=re.I):
         if (info := parse_proxy_link(link)):
-            extras_map.setdefault(info['host'], []).append(info)
+            extras_map.setdefault(normalize_host_key(info['host']), []).append(info)
 
     domain_rx = (r'(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+'
                  r'[A-Za-z]{2,63}')
@@ -188,15 +223,22 @@ async def parse_message_text(text: str) -> tuple[list[tuple[str, str]],
         if ':' in token and is_ipv6(token) and token not in items:
             items.append(token)
 
-    resolved: list[tuple[str, str]] = []
+    resolved: list[tuple[str, list[str]]] = []
+    seen_hosts: set[str] = set()
     for it in items:
         host = extract_host_from_link(it)
         if not host:
             if re.fullmatch(rf'({domain_rx})|(\d{{1,3}}(\.\d{{1,3}}){{3}})', it) \
                or is_ipv6(it):
                 host = it
-        if host and (res := await resolve_hostname(host)):
-            resolved.append(res)
+        if not host:
+            continue
+        norm = normalize_host_key(host)
+        if norm in seen_hosts:
+            continue
+        if ips := await resolve_hostname(host):
+            resolved.append((host, ips))
+            seen_hosts.add(norm)
     return resolved, extras_map
 
 
@@ -276,6 +318,60 @@ async def build_info_text(host: str, ip: str, extras: dict | None,
     return txt
 
 
+def purge_ip_states() -> None:
+    now = time.time()
+    expired = [key for key, val in _ip_state_store.items()
+               if now - val.get('created', 0) > IP_STATE_TTL]
+    for key in expired:
+        _ip_state_store.pop(key, None)
+
+    if len(_ip_state_store) <= IP_STATE_LIMIT:
+        return
+
+    overflow = len(_ip_state_store) - IP_STATE_LIMIT
+    for key in sorted(_ip_state_store,
+                      key=lambda k: _ip_state_store[k].get('created', 0))[:overflow]:
+        _ip_state_store.pop(key, None)
+
+
+def register_ip_state(host: str, ips: list[str], extras: dict | None) -> str:
+    purge_ip_states()
+    state_id = secrets.token_urlsafe(8)
+    _ip_state_store[state_id] = {
+        'host': host,
+        'ips': ips,
+        'extras': extras,
+        'created': time.time(),
+    }
+    return state_id
+
+
+def get_ip_state(state_id: str) -> dict[str, Any] | None:
+    state = _ip_state_store.get(state_id)
+    if not state:
+        return None
+    if time.time() - state.get('created', 0) > IP_STATE_TTL:
+        _ip_state_store.pop(state_id, None)
+        return None
+    return state
+
+
+async def build_host_response(host: str, ips: list[str],
+                              extras: dict | None) -> tuple[str, InlineKeyboardMarkup | None]:
+    if not ips:
+        return f"Failed to resolve {host}", None
+
+    nav_info: dict[str, Any] | None = None
+    total = len(ips)
+    if total > 1:
+        state_id = register_ip_state(host, ips, extras)
+        nav_info = {'state_id': state_id, 'index': 0, 'total': total}
+
+    text = await build_info_text(host, ips[0], extras, include_links=False)
+    keyboard = create_keyboard(host, ips[0], nav_info)
+    return text, keyboard
+
+
 @dp.message(Command("start"))
 async def start_handler(m: types.Message):
     await m.answer(
@@ -283,18 +379,83 @@ async def start_handler(m: types.Message):
     )
 
 
-def create_keyboard(host: str, ip: str) -> InlineKeyboardMarkup | None:
-    if is_local_ip(ip):
-        return None
+def create_keyboard(host: str, ip: str,
+                    nav_info: dict[str, Any] | None = None) -> InlineKeyboardMarkup | None:
     rows: list[list[InlineKeyboardButton]] = []
-    rows.extend([
-        [InlineKeyboardButton(text="BGP", url=f"https://bgp.tools/prefix-selector?ip={ip}")],
-        [InlineKeyboardButton(text="Censys", url=f"https://search.censys.io/hosts/{ip}")],
-        [InlineKeyboardButton(text="IPinfo", url=f"https://ipinfo.io/{ip}")],
-    ])
+
+    if not is_local_ip(ip):
+        rows.extend([
+            [InlineKeyboardButton(text="BGP", url=f"https://bgp.tools/prefix-selector?ip={ip}")],
+            [InlineKeyboardButton(text="Censys", url=f"https://search.censys.io/hosts/{ip}")],
+            [InlineKeyboardButton(text="IPinfo", url=f"https://ipinfo.io/{ip}")],
+        ])
     if is_domain_name(host):
         rows.append([InlineKeyboardButton(text="WHOIS", url=f"https://who.is/whois/{host}")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    if nav_info and nav_info.get('total', 1) > 1:
+        state_id = nav_info.get('state_id', '')
+        index = int(nav_info.get('index', 0))
+        total = int(nav_info.get('total', 1))
+        nav_row: list[InlineKeyboardButton] = []
+        if index > 0:
+            nav_row.append(InlineKeyboardButton(
+                text=f"<- {index + 1}/{total}",
+                callback_data=f"nav|{state_id}|{index - 1}"
+            ))
+        if index < total - 1:
+            nav_row.append(InlineKeyboardButton(
+                text=f"{index + 1}/{total} ->",
+                callback_data=f"nav|{state_id}|{index + 1}"
+            ))
+        if nav_row:
+            rows.append(nav_row)
+
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+
+
+@dp.callback_query(Text(startswith="nav|"))
+async def ip_nav_handler(cb: types.CallbackQuery):
+    data = cb.data or ""
+    parts = data.split("|")
+    if len(parts) != 3:
+        await cb.answer("Bad data", show_alert=False)
+        return
+
+    _, state_id, target_idx_raw = parts
+    state = get_ip_state(state_id)
+    if not state:
+        await cb.answer("Expired", show_alert=False)
+        return
+
+    try:
+        target_idx = int(target_idx_raw)
+    except ValueError:
+        await cb.answer()
+        return
+
+    ips = state.get('ips') or []
+    if not ips or not (0 <= target_idx < len(ips)):
+        await cb.answer()
+        return
+
+    host = state.get('host') or ''
+    extras = state.get('extras')
+    ip = ips[target_idx]
+    text = await build_info_text(host, ip, extras, include_links=False)
+    nav_info = {'state_id': state_id, 'index': target_idx, 'total': len(ips)}
+    keyboard = create_keyboard(host, ip, nav_info)
+
+    try:
+        if cb.message:
+            await cb.message.edit_text(text, reply_markup=keyboard)
+        elif cb.inline_message_id:
+            await bot.edit_message_text(text=text,
+                                        inline_message_id=cb.inline_message_id,
+                                        reply_markup=keyboard)
+    except Exception as e:
+        logging.warning(f"Failed to edit message for {host}: {e}")
+
+    await cb.answer()
 
 
 @dp.message()
@@ -315,18 +476,14 @@ async def msg_handler(m: types.Message):
             if sub_host:
                 res0 = await resolve_hostname(sub_host)
                 if res0:
-                    t0 = await build_info_text(res0[0], res0[1],
-                                               extras=None,
-                                               include_links=False)
-                    await m.answer(t0, reply_markup=create_keyboard(res0[0], res0[1]))
+                    t0, kb0 = await build_host_response(sub_host, res0, extras=None)
+                    await m.answer(t0, reply_markup=kb0)
                     await asyncio.sleep(0.35)
 
             for i, inf in enumerate(sub_infos):
                 if (res := await resolve_hostname(inf['host'])):
-                    t = await build_info_text(res[0], res[1],
-                                              extras=inf,
-                                              include_links=False)
-                    await m.answer(t, reply_markup=create_keyboard(res[0], res[1]))
+                    t, kb = await build_host_response(inf['host'], res, extras=inf)
+                    await m.answer(t, reply_markup=kb)
                 if i < len(sub_infos) - 1:
                     await asyncio.sleep(0.35)
             return
@@ -337,18 +494,13 @@ async def msg_handler(m: types.Message):
         await m.answer("No domains/IPs found.")
         return
 
-    if len(resolved) == 1:
-        h, ip = resolved[0]
-        ex = extras_map.get(h, [None])[0] if extras_map.get(h) else None
-        t = await build_info_text(h, ip, ex, include_links=False)
-        await m.answer(t, reply_markup=create_keyboard(h, ip))
-    else:
-        for i, (h, ip) in enumerate(resolved):
-            ex = extras_map.get(h, [None])[0] if extras_map.get(h) else None
-            t = await build_info_text(h, ip, ex, include_links=False)
-            await m.answer(t, reply_markup=create_keyboard(h, ip))
-            if i < len(resolved) - 1:
-                await asyncio.sleep(0.3)
+    for i, (h, ips) in enumerate(resolved):
+        extras_list = extras_map.get(normalize_host_key(h))
+        ex = extras_list[0] if extras_list else None
+        t, kb = await build_host_response(h, ips, ex)
+        await m.answer(t, reply_markup=kb)
+        if len(resolved) > 1 and i < len(resolved) - 1:
+            await asyncio.sleep(0.3)
 
 
 @dp.inline_query()
@@ -365,19 +517,20 @@ async def inline_q(q: InlineQuery):
     else:
         res, extras_map = await parse_message_text(query)
         if res:
-            h, ip = res[0]
-            ex = extras_map.get(h, [None])[0] if extras_map.get(h) else None
-            txt = await build_info_text(h, ip, ex, include_links=False)
+            h, ips = res[0]
+            extras_list = extras_map.get(normalize_host_key(h))
+            ex = extras_list[0] if extras_list else None
+            txt, kb = await build_host_response(h, ips, ex)
             title = ("Info: " if "Failed" not in txt else "Error: ") + h
             desc = txt.split('\n\n')[1].split('\n')[0] if '\n\n' in txt else txt
-            rid = hashlib.sha256(f"{h}_{ip}".encode()).hexdigest()[:16]
+            rid = hashlib.sha256(f"{h}_{ips[0]}".encode()).hexdigest()[:16]
             results.append(InlineQueryResultArticle(
                 id=rid,
                 title=title,
                 description=desc,
                 input_message_content=InputTextMessageContent(
                     message_text=txt),
-                reply_markup=create_keyboard(h, ip)
+                reply_markup=kb
             ))
         else:
             results.append(InlineQueryResultArticle(
