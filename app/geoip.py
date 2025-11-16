@@ -3,6 +3,7 @@ import shutil
 import logging
 import requests
 import geoip2.database
+import maxminddb
 from pathlib import Path
 
 from .config import LICENSE_KEY, IPINFO_TOKEN, DATA_DIR
@@ -167,12 +168,26 @@ def update_databases() -> None:
     update_ipinfo_lite()
 
 
+def close_ipinfo_lite() -> None:
+    global ipinfo_lite_reader
+    if ipinfo_lite_reader is None:
+        return
+    try:
+        ipinfo_lite_reader.close()
+    except Exception as exc:
+        logging.debug("Error closing IPinfo Lite reader: %s", exc)
+    ipinfo_lite_reader = None
+
+
 def load_ipinfo_lite() -> None:
     global ipinfo_lite_reader
+    close_ipinfo_lite()
+    if not IPINFO_LITE_DB.exists():
+        logging.warning("IPinfo Lite DB not found at %s", IPINFO_LITE_DB)
+        return
     try:
-        if IPINFO_LITE_DB.exists():
-            ipinfo_lite_reader = geoip2.database.Reader(str(IPINFO_LITE_DB))
-            logging.info("IPinfo Lite DB loaded.")
+        ipinfo_lite_reader = maxminddb.open_database(str(IPINFO_LITE_DB))
+        logging.info("IPinfo Lite DB loaded.")
     except Exception as e:
         logging.error("IPinfo Lite load error: %s", e)
 

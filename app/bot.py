@@ -8,6 +8,7 @@ import json
 import ipaddress
 import secrets
 import time
+import html
 from typing import Any, Optional
 
 import aiohttp
@@ -33,9 +34,18 @@ DNS_HEADERS = {"Accept": "application/dns-json"}
 IP_STATE_TTL = 3600  # seconds
 IP_STATE_LIMIT = 512
 
+WHOIS_TLD_MAP = {
+    'ru': 'https://www.nic.ru/whois/?query={domain}',
+    'su': 'https://www.nic.ru/whois/?query={domain}',
+    'xn--p1ai': 'https://www.nic.ru/whois/?query={domain}',  # .рф
+    'ua': 'https://hostmaster.ua/?dom={domain}',
+    'by': 'https://whois.cctld.by/?request={domain}',
+    'kz': 'https://whois.nic.kz/?query={domain}',
+}
+
 _ip_state_store: dict[str, dict[str, Any]] = {}
 
-bot = Bot(token=API_TOKEN)
+bot = Bot(token=API_TOKEN, parse_mode='HTML')
 dp = Dispatcher()
 
 
@@ -203,6 +213,34 @@ def normalize_host_key(host: str) -> str:
     return host.lower()
 
 
+def to_punycode(domain: str) -> str:
+    try:
+        return domain.encode('idna').decode('ascii')
+    except Exception:
+        return domain
+
+
+def build_whois_url(host: str) -> str | None:
+    if not is_domain_name(host):
+        return None
+    puny = to_punycode(host)
+    tld = puny.rsplit('.', 1)[-1].lower()
+    template = WHOIS_TLD_MAP.get(tld)
+    if template:
+        return template.format(domain=puny)
+    return f"https://who.is/whois/{puny}"
+
+
+def html_escape(val: str | None) -> str:
+    return html.escape(val or "", quote=True)
+
+
+def strip_html(text: str) -> str:
+    # naive removal, acceptable for short snippets
+    no_tags = re.sub(r'<[^>]+>', '', text)
+    return html.unescape(no_tags).strip()
+
+
 async def parse_message_text(text: str) -> tuple[list[tuple[str, list[str]]],
                                                  dict[str, list[dict]]]:
     extras_map: dict[str, list[dict]] = {}
@@ -242,35 +280,37 @@ async def parse_message_text(text: str) -> tuple[list[tuple[str, list[str]]],
     return resolved, extras_map
 
 
-async def build_info_text(host: str, ip: str, extras: dict | None,
-                          include_links: bool) -> str:
-    """
-    Сформировать итоговый plain-текст.
-    """
+async def build_info_text(host: str, ip: str, extras: dict | None) -> str:
     data = await fetch_ip_info(ip)
-    if not data:
-        return f"Failed to get info for {host} ({ip})"
+    host_safe = html_escape(host)
+    whois_url = build_whois_url(host)
+    lines: list[str] = []
+    if whois_url:
+        lines.append(f"<code>{host_safe}</code> (<a href=\"{whois_url}\">who.is</a>)")
+    else:
+        lines.append(f"<code>{host_safe}</code>")
 
-    header = host if host == ip or is_ipv4(host) or is_ipv6(host) \
-        else f"{host} ({ip})"
-
-    # --- доп-инфо: порт, тип, SNI ---
+    extra_lines: list[str] = []
     if extras:
-        # автозаполнение SNI для VLESS, если не пришло
-        if extras.get('scheme') == 'vless' and not extras.get('sni'):
-            extras['sni'] = host
-        lines = []
-        if extras.get('port'):
-            lines.append(f"Port: {extras['port']}")
-        if extras.get('scheme'):
-            lines.append(f"Type: {extras['scheme']}")
-        if extras.get('sni'):
-            lines.append(f"SNI: {extras['sni']}")
-        if lines:
-            header = f"{header}\n" + "\n".join(lines)
+        scheme = extras.get('scheme')
+        port = extras.get('port')
+        sni = extras.get('sni') or (host if scheme == 'vless' else None)
+        if port:
+            extra_lines.append(f"Port: {html_escape(str(port))}")
+        if scheme:
+            extra_lines.append(f"Type: {html_escape(str(scheme))}")
+        if sni:
+            extra_lines.append(f"SNI: {html_escape(str(sni))}")
+    if extra_lines:
+        lines.extend(extra_lines)
 
-    def join_non_empty(parts: list[str]) -> str:
-        return " / ".join([p for p in parts if p])
+    lines.append("")
+    lines.append(f"{html_escape(ip)}")
+
+    if not data:
+        lines.append("")
+        lines.append("Failed to get geo info")
+        return "\n".join(lines)
 
     mm = data.get("maxmind", {})
     ii = data.get("ipinfo", {})
@@ -278,25 +318,29 @@ async def build_info_text(host: str, ip: str, extras: dict | None,
 
     if local:
         local_label = classify_local_ip(ip) or "Private Network IP"
-        return f"{header}\n\n{local_label}"
+        lines.append("")
+        lines.append(html_escape(local_label))
+        return "\n".join(lines)
+
+    def join_non_empty(parts: list[str]) -> str:
+        return " / ".join([p for p in parts if p])
 
     mm_lines: list[str] = []
-    ii_lines: list[str] = []
-
     mm1 = join_non_empty([
         mm.get('country_code', ''),
         mm.get('country_name', ''),
         mm.get('city_name', ''),
     ])
     if mm1:
-        mm_lines.append(mm1)
+        mm_lines.append(html_escape(mm1))
     mm2 = join_non_empty([
         mm.get('asn', ''),
         mm.get('as_desc', ''),
     ])
     if mm2:
-        mm_lines.append(mm2)
+        mm_lines.append(html_escape(mm2))
 
+    ii_lines: list[str] = []
     cc = ii.get('country', '')
     cname = ii.get('country_name', '') if cc else ''
     ii1 = join_non_empty([
@@ -305,17 +349,21 @@ async def build_info_text(host: str, ip: str, extras: dict | None,
         ii.get('city', ''),
     ])
     if ii1:
-        ii_lines.append(ii1)
+        ii_lines.append(html_escape(ii1))
     org_val = ii.get('org', '')
     if org_val:
-        ii_lines.append(format_org(org_val))
+        ii_lines.append(html_escape(format_org(org_val)))
 
-    txt = f"{header}\n\n"
     if mm_lines:
-        txt += "MaxMind\n" + "\n".join(mm_lines) + "\n\n"
+        lines.append("")
+        lines.append("MaxMind")
+        lines.extend(mm_lines)
     if ii_lines:
-        txt += "IPinfo\n" + "\n".join(ii_lines)
-    return txt
+        lines.append("")
+        lines.append("IPinfo")
+        lines.extend(ii_lines)
+
+    return "\n".join(lines)
 
 
 def purge_ip_states() -> None:
@@ -367,7 +415,7 @@ async def build_host_response(host: str, ips: list[str],
         state_id = register_ip_state(host, ips, extras)
         nav_info = {'state_id': state_id, 'index': 0, 'total': total}
 
-    text = await build_info_text(host, ips[0], extras, include_links=False)
+    text = await build_info_text(host, ips[0], extras)
     keyboard = create_keyboard(host, ips[0], nav_info)
     return text, keyboard
 
@@ -389,8 +437,9 @@ def create_keyboard(host: str, ip: str,
             [InlineKeyboardButton(text="Censys", url=f"https://search.censys.io/hosts/{ip}")],
             [InlineKeyboardButton(text="IPinfo", url=f"https://ipinfo.io/{ip}")],
         ])
-    if is_domain_name(host):
-        rows.append([InlineKeyboardButton(text="WHOIS", url=f"https://who.is/whois/{host}")])
+    whois_url = build_whois_url(host)
+    if whois_url:
+        rows.append([InlineKeyboardButton(text="WHOIS", url=whois_url)])
 
     if nav_info and nav_info.get('total', 1) > 1:
         state_id = nav_info.get('state_id', '')
@@ -413,11 +462,9 @@ def create_keyboard(host: str, ip: str,
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
-@dp.callback_query()
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith("nav|"))
 async def ip_nav_handler(cb: types.CallbackQuery):
     data = cb.data or ""
-    if not data.startswith("nav|"):
-        return
     parts = data.split("|")
     if len(parts) != 3:
         await cb.answer("Bad data", show_alert=False)
@@ -443,17 +490,18 @@ async def ip_nav_handler(cb: types.CallbackQuery):
     host = state.get('host') or ''
     extras = state.get('extras')
     ip = ips[target_idx]
-    text = await build_info_text(host, ip, extras, include_links=False)
+    text = await build_info_text(host, ip, extras)
     nav_info = {'state_id': state_id, 'index': target_idx, 'total': len(ips)}
     keyboard = create_keyboard(host, ip, nav_info)
 
     try:
         if cb.message:
-            await cb.message.edit_text(text, reply_markup=keyboard)
+            await cb.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
         elif cb.inline_message_id:
             await bot.edit_message_text(text=text,
                                         inline_message_id=cb.inline_message_id,
-                                        reply_markup=keyboard)
+                                        reply_markup=keyboard,
+                                        parse_mode='HTML')
     except Exception as e:
         logging.warning(f"Failed to edit message for {host}: {e}")
 
@@ -523,15 +571,25 @@ async def inline_q(q: InlineQuery):
             extras_list = extras_map.get(normalize_host_key(h))
             ex = extras_list[0] if extras_list else None
             txt, kb = await build_host_response(h, ips, ex)
-            title = ("Info: " if "Failed" not in txt else "Error: ") + h
-            desc = txt.split('\n\n')[1].split('\n')[0] if '\n\n' in txt else txt
+            plain_txt = strip_html(txt)
+            plain_lines = [ln for ln in plain_txt.splitlines() if ln.strip()]
+            if len(plain_lines) > 1:
+                desc = plain_lines[1]
+            elif plain_lines:
+                desc = plain_lines[0]
+            else:
+                desc = plain_txt
+            desc = (desc or plain_txt)[:120]
+            title_prefix = "Error: " if "Failed to get geo info" in plain_txt else "Info: "
+            title = title_prefix + h
             rid = hashlib.sha256(f"{h}_{ips[0]}".encode()).hexdigest()[:16]
             results.append(InlineQueryResultArticle(
                 id=rid,
                 title=title,
                 description=desc,
                 input_message_content=InputTextMessageContent(
-                    message_text=txt),
+                    message_text=txt,
+                    parse_mode='HTML'),
                 reply_markup=kb
             ))
         else:

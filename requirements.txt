@@ -5,3 +5,4 @@ apscheduler
 werkzeug
 aiogram
 pycountry
+maxminddb
