@@ -24,6 +24,16 @@ logging.basicConfig(
 app = Flask(__name__)
 
 
+def is_valid_ip(addr: str | None) -> bool:
+    if not addr:
+        return False
+    try:
+        ipaddress.ip_address(addr)
+        return True
+    except ValueError:
+        return False
+
+
 def classify_local_ip(addr: str) -> str | None:
     try:
         obj = ipaddress.ip_address(addr)
@@ -151,6 +161,9 @@ def generate_text(ip, geo, asn, ipinfo, user_agent):
 
 def get_ip_info(ip):
     user_agent = request.headers.get('User-Agent', '')
+    if not is_valid_ip(ip):
+        invalid = {"error": "invalid_ip"}
+        return user_agent, invalid, invalid, invalid
     geo = get_geoip_info(ip)
     asn = get_asn_info(ip)
     ipinfo = get_ipinfo_info(ip)
