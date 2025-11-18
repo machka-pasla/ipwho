@@ -380,17 +380,12 @@ async def build_info_text(host: str, ip: str, extras: dict | None) -> str:
 
     if host and host != ip:
         add_blank_line()
-        ech_label = None
+        suffix = ""
         if is_domain_name(host):
             ech_status = await fetch_ech_status(host)
             if ech_status is True:
-                ech_label = "ECH on"
-            elif ech_status is False:
-                ech_label = "ECH off"
-        domain_line = f"<code>{host_safe}</code>"
-        if ech_label:
-            domain_line = f"{domain_line} {ech_label}"
-        lines.append(domain_line)
+                suffix = " (ECH ON)"
+        lines.append(f"<code>{host_safe}</code>{suffix}")
 
     add_blank_line()
     lines.append(f"<code>{html_escape(ip)}</code>")
