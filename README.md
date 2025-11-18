@@ -14,6 +14,14 @@ Images are published to GHCR with two component tags:
 - `ghcr.io/machka-pasla/ipwho:web`
 - `ghcr.io/machka-pasla/ipwho:bot`
 
+Both images are produced from the same multi-stage `Dockerfile`. Build a
+specific component locally with:
+
+```bash
+docker build --target web -t ghcr.io/machka-pasla/ipwho:web .
+docker build --target bot -t ghcr.io/machka-pasla/ipwho:bot .
+```
+
 ### Quick start (no repo clone)
 
 Prerequisites: Docker and Docker Compose.

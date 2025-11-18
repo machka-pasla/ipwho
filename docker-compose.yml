@@ -1,6 +1,9 @@
 services:
   ipwho-web:
     image: ghcr.io/machka-pasla/ipwho:web
+    build:
+      context: .
+      target: web
     container_name: ipwho-web
     hostname: ipwho-web
     networks:
@@ -14,6 +17,9 @@ services:
 
   ipwho-bot:
     image: ghcr.io/machka-pasla/ipwho:bot
+    build:
+      context: .
+      target: bot
     container_name: ipwho-bot
     hostname: ipwho-bot
     restart: unless-stopped
