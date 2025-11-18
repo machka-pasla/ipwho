@@ -51,6 +51,14 @@ WHOIS_TLD_MAP = {
     'kz': 'https://whois.nic.kz/?query={domain}',
 }
 
+ECH_STATUS_CACHE_TTL = 3600  # seconds
+ECH_DNS_TIMEOUT = 5  # seconds
+ECH_QUERY_PATTERNS = (
+    ('HTTPS', lambda host: host),
+    ('SVCB', lambda host: f"_443._https.{host}"),
+)
+
+_ech_status_cache: dict[str, dict[str, Any]] = {}
 _ip_state_store: dict[str, dict[str, Any]] = {}
 
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
@@ -215,6 +223,83 @@ def build_whois_url(host: str) -> str | None:
     return f"https://who.is/whois/{puny}"
 
 
+def _make_ech_query_targets(host: str) -> list[tuple[str, str]]:
+    clean_host = host.rstrip('.')
+    if not clean_host:
+        return []
+    targets: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for record_type, builder in ECH_QUERY_PATTERNS:
+        try:
+            target = builder(clean_host)
+        except Exception:
+            continue
+        target = (target or '').rstrip('.')
+        if not target or target in seen:
+            continue
+        seen.add(target)
+        targets.append((target, record_type))
+    return targets
+
+
+async def _query_ech_status(host: str) -> bool | None:
+    targets = _make_ech_query_targets(host)
+    if not targets:
+        return None
+
+    had_success = False
+    async with aiohttp.ClientSession(headers=DNS_HEADERS) as session:
+        for name, record_type in targets:
+            try:
+                async with session.get(
+                    DOH_ENDPOINT,
+                    params={'name': name, 'type': record_type},
+                    timeout=ECH_DNS_TIMEOUT,
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json(content_type=None)
+            except Exception as e:
+                logging.debug(f"ECH check DoH error for {name} [{record_type}]: {e}")
+                continue
+
+            had_success = True
+            answers = data.get('Answer') or []
+            found_rr = False
+            for ans in answers:
+                rtype = ans.get('type')
+                if rtype not in (64, 65):
+                    continue
+                found_rr = True
+                raw = ans.get('data')
+                if isinstance(raw, str) and 'echconfig=' in raw.lower():
+                    return True
+            if found_rr:
+                return False
+
+    return False if had_success else None
+
+
+async def fetch_ech_status(host: str) -> bool | None:
+    if not host or not is_domain_name(host):
+        return None
+    puny = to_punycode(host).rstrip('.')
+    if not puny:
+        return None
+    key = normalize_host_key(puny)
+    cached = _ech_status_cache.get(key)
+    now = time.time()
+    if cached and now - cached.get('ts', 0) < ECH_STATUS_CACHE_TTL:
+        return cached.get('status')
+
+    status = await _query_ech_status(puny)
+    if status is not None:
+        _ech_status_cache[key] = {'status': status, 'ts': time.time()}
+    else:
+        _ech_status_cache.pop(key, None)
+    return status
+
+
 def html_escape(val: str | None) -> str:
     return html.escape(val or "", quote=True)
 
@@ -295,7 +380,17 @@ async def build_info_text(host: str, ip: str, extras: dict | None) -> str:
 
     if host and host != ip:
         add_blank_line()
-        lines.append(f"<code>{host_safe}</code>")
+        ech_label = None
+        if is_domain_name(host):
+            ech_status = await fetch_ech_status(host)
+            if ech_status is True:
+                ech_label = "ECH on"
+            elif ech_status is False:
+                ech_label = "ECH off"
+        domain_line = f"<code>{host_safe}</code>"
+        if ech_label:
+            domain_line = f"{domain_line} {ech_label}"
+        lines.append(domain_line)
 
     add_blank_line()
     lines.append(f"<code>{html_escape(ip)}</code>")
