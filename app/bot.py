@@ -319,6 +319,7 @@ async def build_info_text(host: str, ip: str, extras: dict | None) -> str:
         return " / ".join([p for p in parts if p])
 
     mm_lines: list[str] = []
+    mm_has_geo = False
     mm1 = join_non_empty([
         mm.get('country_code', ''),
         mm.get('country_name', ''),
@@ -326,6 +327,7 @@ async def build_info_text(host: str, ip: str, extras: dict | None) -> str:
     ])
     if mm1:
         mm_lines.append(html_escape(mm1))
+        mm_has_geo = True
     mm2 = join_non_empty([
         mm.get('asn', ''),
         mm.get('as_desc', ''),
@@ -334,6 +336,7 @@ async def build_info_text(host: str, ip: str, extras: dict | None) -> str:
         mm_lines.append(html_escape(mm2))
 
     ii_lines: list[str] = []
+    ii_has_geo = False
     cc = ii.get('country', '')
     cname = ii.get('country_name', '') if cc else ''
     ii1 = join_non_empty([
@@ -343,20 +346,24 @@ async def build_info_text(host: str, ip: str, extras: dict | None) -> str:
     ])
     if ii1:
         ii_lines.append(html_escape(ii1))
+        ii_has_geo = True
     org_val = ii.get('org', '')
     if org_val:
         ii_lines.append(html_escape(format_org(org_val)))
 
-    def append_geo_section(title: str, entries: list[str]) -> None:
+    def append_geo_section(title: str, entries: list[str],
+                           has_geo_data: bool = True) -> None:
         add_blank_line()
         lines.append(title)
-        if entries:
-            lines.extend(entries)
-        else:
+        if not entries:
             lines.append("No geo info")
+            return
+        if not has_geo_data:
+            lines.append("No geo info")
+        lines.extend(entries)
 
-    append_geo_section("MaxMind", mm_lines)
-    append_geo_section("IPinfo", ii_lines)
+    append_geo_section("MaxMind", mm_lines, has_geo_data=mm_has_geo)
+    append_geo_section("IPinfo", ii_lines, has_geo_data=ii_has_geo)
 
     return "\n".join(lines)
 
@@ -391,6 +398,7 @@ def _make_state_id(host: str, ips: list[str], extras: dict | None) -> str:
         'host': (host or '').lower(),
         'ips': sorted(ips),
         'extras': _normalize_extras_for_state(extras),
+        'nonce': secrets.token_hex(8),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]
